@@ -2,9 +2,16 @@
 #include <canard.h>
 #include <o1heap.h>
 #include <time.h>
+#include <string>
+#include <vector>
+#include <filesystem>
+#include <iostream>
+#include <fstream>
 
 #include <uavcan/node/Heartbeat_1_0.h>
 #include <uavcan/node/GetInfo_1_0.h>
+
+#include <uavcan/file/Read_1_1.h>
 
 #define VERSION_MAJOR 1
 #define VERSION_MINOR 0
@@ -74,6 +81,67 @@ static uavcan_node_GetInfo_Response_1_0 processRequestNodeGetInfo()
     return resp;
 }
 
+void handleReadRequest(const CanardRxTransfer *const transfer)
+{
+    size_t size = transfer->payload_size;
+    uavcan_file_Read_Request_1_1 msg = {0};
+    uavcan_file_Read_Response_1_1 resp = {};
+    if (uavcan_file_Read_Request_1_1_deserialize_(&msg, static_cast<uint8_t *>(transfer->payload), &size) >= 0)
+    {
+        std::string targetPath = "../firmware/" + std::string(reinterpret_cast<const char *>(msg.path.path.elements), msg.path.path.count);
+        size_t offset = msg.offset;
+
+        if (!std::filesystem::exists(targetPath))
+        {
+            resp._error.value = uavcan_file_Error_1_0_NOT_FOUND;
+        }
+        else if (std::filesystem::is_directory(targetPath))
+        {
+            resp._error.value = uavcan_file_Error_1_0_IS_DIRECTORY;
+        }
+        else if (offset > std::filesystem::file_size(targetPath))
+        {
+            resp._error.value = uavcan_file_Error_1_0_INVALID_VALUE;
+        }
+        else
+        {
+            std::ifstream file(targetPath, std::ios::binary);
+            if (!file.is_open())
+            {
+                resp._error.value = uavcan_file_Error_1_0_IO_ERROR;
+            }
+            else
+            {
+                file.seekg(offset);
+                std::vector<char> buffer(uavcan_primitive_Unstructured_1_0_value_ARRAY_CAPACITY_);
+                file.read(buffer.data(), uavcan_primitive_Unstructured_1_0_value_ARRAY_CAPACITY_);
+                if (file.fail() && !file.eof())
+                {
+                    resp._error.value = uavcan_file_Error_1_0_IO_ERROR;
+                }
+                else
+                {
+                    resp._error.value = uavcan_file_Error_1_0_OK;
+                    resp.data.value.count = file.gcount();
+                    for (size_t i = 0; i < resp.data.value.count; ++i)
+                    {
+                        resp.data.value.elements[i] = static_cast<uint8_t>(buffer[i]);
+                    }
+                }
+                file.close();
+            }
+        }
+    }
+
+    uint8_t serialized[uavcan_file_Read_Response_1_1_SERIALIZATION_BUFFER_SIZE_BYTES_] = {0};
+    size_t serialized_size = sizeof(serialized);
+    const int8_t res = uavcan_file_Read_Response_1_1_serialize_(&resp, &serialized[0], &serialized_size);
+    if (res >= 0)
+        sendResponse(transfer, serialized_size, &serialized[0]);
+    else
+        assert(false);
+}
+
 // Handle Received Frames
 static void processTransfer(const CanardRxTransfer *const transfer)
 {
@@ -90,6 +158,10 @@ static void processTransfer(const CanardRxTransfer *const transfer)
                 sendResponse(transfer, serialized_size, &serialized[0]);
             else
                 assert(false);
+        }
+        else if (transfer->metadata.port_id == uavcan_file_Read_1_1_FIXED_PORT_ID_)
+        {
+            handleReadRequest(transfer);
         }
     }
 }
@@ -126,6 +198,17 @@ int main()
                                              CanardTransferKindRequest,
                                              uavcan_node_GetInfo_1_0_FIXED_PORT_ID_,
                                              uavcan_node_GetInfo_Request_1_0_EXTENT_BYTES_,
+                                             CANARD_DEFAULT_TRANSFER_ID_TIMEOUT_USEC,
+                                             &rx);
+        if (res < 0)
+            return -res;
+    }
+    {
+        static CanardRxSubscription rx;
+        const int8_t res = canardRxSubscribe(&canard,
+                                             CanardTransferKindRequest,
+                                             uavcan_file_Read_1_1_FIXED_PORT_ID_,
+                                             uavcan_file_Read_Request_1_1_EXTENT_BYTES_,
                                              CANARD_DEFAULT_TRANSFER_ID_TIMEOUT_USEC,
                                              &rx);
         if (res < 0)
