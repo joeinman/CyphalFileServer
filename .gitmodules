@@ -1,0 +1,12 @@
+[submodule "external/libcanard"]
+	path = external/libcanard
+	url = https://github.com/OpenCyphal/libcanard
+[submodule "external/platform_specific_components"]
+	path = external/platform_specific_components
+	url = https://github.com/OpenCyphal-Garage/platform_specific_components
+[submodule "external/public_regulated_data_types"]
+	path = external/public_regulated_data_types
+	url = https://github.com/OpenCyphal/public_regulated_data_types
+[submodule "external/o1heap"]
+	path = external/o1heap
+	url = https://github.com/pavel-kirienko/o1heap
