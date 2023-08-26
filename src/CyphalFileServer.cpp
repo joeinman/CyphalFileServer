@@ -1,22 +1,10 @@
 #include <socketcan.h>
 #include <canard.h>
 #include <o1heap.h>
+#include <time.h>
 
-#include <uavcan/node/ExecuteCommand_1_1.h>
 #include <uavcan/node/Heartbeat_1_0.h>
 #include <uavcan/node/GetInfo_1_0.h>
-
-#include <iostream>
-
-#include <time.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <assert.h>
-#include <time.h>
-#include <unistd.h>
-
-#define KILO 1000L
-#define MEGA ((int64_t)KILO * KILO)
 
 #define VERSION_MAJOR 1
 #define VERSION_MINOR 0
@@ -56,7 +44,7 @@ static void sendResponse(const CanardRxTransfer *const original_request_transfer
 {
     CanardTransferMetadata meta = original_request_transfer->metadata;
     meta.transfer_kind = CanardTransferKindResponse;
-    send(original_request_transfer->timestamp_usec + MEGA, &meta, payload_size, payload);
+    send(original_request_transfer->timestamp_usec + 1e6, &meta, payload_size, payload);
 }
 
 /// Constructs a response to uavcan.node.GetInfo which contains the basic information about this node.
@@ -99,13 +87,9 @@ static void processTransfer(const CanardRxTransfer *const transfer)
             size_t serialized_size = sizeof(serialized);
             const int8_t res = uavcan_node_GetInfo_Response_1_0_serialize_(&resp, &serialized[0], &serialized_size);
             if (res >= 0)
-            {
                 sendResponse(transfer, serialized_size, &serialized[0]);
-            }
             else
-            {
                 assert(false);
-            }
         }
     }
 }
@@ -124,10 +108,7 @@ int main()
     // Initialise SocketCAN
     auto socketCAN = socketcanOpen("vcan0", false);
     if (socketCAN < 0)
-    {
-        std::cout << "error" << std::endl;
         return -1;
-    }
 
     // Create libcanard Instance
     canard = canardInit(
@@ -176,28 +157,14 @@ int main()
             if (err >= 0)
             {
                 static uint8_t heartbeat_transfer_id; // Must be static or heap-allocated to retain state between calls.
-                const CanardTransferMetadata transfer_metadata = {
+                const CanardTransferMetadata transfer = {
                     .priority = CanardPriorityNominal,
                     .transfer_kind = CanardTransferKindMessage,
                     .port_id = uavcan_node_Heartbeat_1_0_FIXED_PORT_ID_, // This is the subject-ID.
                     .remote_node_id = CANARD_NODE_ID_UNSET,              // Messages cannot be unicast, so use UNSET.
-                    .transfer_id = heartbeat_transfer_id,
+                    .transfer_id = heartbeat_transfer_id++,
                 };
-
-                ++heartbeat_transfer_id; // The transfer-ID shall be incremented after every transmission on this subject.
-
-                int32_t result = canardTxPush(&queue, // Call this once per redundant CAN interface (queue).
-                                              &canard,
-                                              now + 1e6, // Zero if transmission deadline is not limited.
-                                              &transfer_metadata,
-                                              serialized_size, // Size of the message payload (see Nunavut transpiler).
-                                              &serialized[0]);
-                if (result < 0)
-                {
-                    // An error has occurred: either an argument is invalid, the TX queue is full, or we've run out of memory.
-                    // It is possible to statically prove that an out-of-memory will never occur for a given application if the
-                    // heap is sized correctly; for background, refer to the Robson's Proof and the documentation for O1Heap.
-                }
+                send(now + 1e6, &transfer, serialized_size, &serialized[0]);
             }
             prevHeartbeatLoop = now;
         }
@@ -211,11 +178,8 @@ int main()
             if ((0U == ti->tx_deadline_usec) || (ti->tx_deadline_usec > getMonotonicMicroseconds())) // Check the deadline.
             {
                 if (!socketcanPush(socketCAN, &ti->frame, 0))
-                {
                     continue; // If the driver is busy, break and retry later.
-                }
             }
-            // After the frame is transmitted or if it has timed out while waiting, pop it from the queue and deallocate:
             canard.memory_free(&canard, canardTxPop(&queue, ti));
         }
 
@@ -223,39 +187,21 @@ int main()
 
         // ---------------------------------------- Process Received Frames ----------------------------------------
 
-        // Process received frames by feeding them from SocketCAN to libcanard.
-        // The order in which we handle the redundant interfaces doesn't matter -- libcanard can accept incoming
-        // frames from any of the redundant interface in an arbitrary order.
-        // The internal state machine will sort them out and remove duplicates automatically.
         CanardFrame frame = {0};
         uint8_t buf[CANARD_MTU_CAN_CLASSIC] = {0};
         const int16_t socketcan_result = socketcanPop(socketCAN, &frame, NULL, sizeof(buf), buf, 0, NULL);
-        if (socketcan_result == 0) // The read operation has timed out with no frames, nothing to do here.
-        {
+        if (socketcan_result == 0)
             continue;
-        }
-        if (socketcan_result < 0) // The read operation has failed. This is not a normal condition.
-        {
+
+        if (socketcan_result < 0)
             return -socketcan_result;
-        }
-        // The SocketCAN adapter uses the wall clock for timestamping, but we need monotonic.
-        // Wall clock can only be used for time synchronization.
-        const CanardMicrosecond timestamp_usec = getMonotonicMicroseconds();
+
         CanardRxTransfer transfer = {};
-        const int8_t canard_result = canardRxAccept(&canard, timestamp_usec, &frame, 0, &transfer, NULL);
+        const int8_t canard_result = canardRxAccept(&canard, getMonotonicMicroseconds(), &frame, 0, &transfer, NULL);
         if (canard_result > 0)
         {
             processTransfer(&transfer);
             canard.memory_free(&canard, (void *)transfer.payload);
-        }
-        else if ((canard_result == 0) || (canard_result == -CANARD_ERROR_OUT_OF_MEMORY))
-        {
-            (void)0; // The frame did not complete a transfer so there is nothing to do.
-            // OOM should never occur if the heap is sized correctly. You can track OOM errors via heap API.
-        }
-        else
-        {
-            assert(false); // No other error can possibly occur at runtime.
         }
 
         // ---------------------------------------------------------------------------------------------------------
